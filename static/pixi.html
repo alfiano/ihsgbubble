@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>IHSG Bubble Chart (Pixi.js)</title>
+  <!-- Pixi.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/pixi.js@7.x/dist/pixi.min.js"></script>
+  <script src="pixi.utils.js"></script>
+  <script src="bubbles_utils.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; background: #181c20; color: #fff; }
+    h1 { text-align: center; }
+    #pixiBubbleChartContainer {
+      width: 100vw;
+      max-width: 100vw;
+      height: 79vh;
+      min-height: 400px;
+      margin: 0 auto 20px auto;
+      background: #222;
+      overflow-x: hidden;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    .legend { text-align: center; margin-top: 10px; }
+    #filter-panel { text-align:center; margin: 18px 0 10px 0; }
+    button { background: #444; color: #fff; border: none; padding: 8px 18px; margin: 0 4px; border-radius: 4px; cursor: pointer; }
+    button:hover { background: #4caf50; color: #fff; }
+  </style>
+</head>
+<body>
+  <h1>IHSG Bubble Chart (Pixi.js)</h1>
+  <div id="pixiBubbleChartContainer"></div>
+  <div id="filter-panel">
+    <div>
+      <button onclick="fetchAndRenderPixi(100)">Top 100</button>
+      <button onclick="fetchAndRenderPixi(200)">Top 200</button>
+      <button onclick="fetchAndRenderPixi(400)">Top 400</button>
+      <button onclick="fetchAndRenderPixi(null, 'change_pct', 'lq45')">LQ45</button>
+      <button onclick="fetchAndRenderPixi(null, 'change_pct', 'issi')">ISSI</button>
+      <button onclick="fetchAndRenderPixi(null, 'change_pct', 'all')">Semua</button>
+    </div>
+  </div>
+  <script>
+    let currentPixiApp = null;
+    let currentRawData = []; // To store the latest fetched API data
+    let currentBubblesData = []; // To store data processed by BubblesUtils.generateCircles
+    let currentBubbleSortKey = 'change_pct'; // Default sort key, matches typical API field for daily % change
+    let currentFilterType = 'all'; // Default filter type: 'all', 'lq45', or 'issi'
+    let tickerUpdateFn = null; // Store the current ticker function to remove it later
+
+    // Debounce function to limit resize event handling frequency
+    function debounce(func, wait) {
+      let timeout;
+      return function executedFunction(...args) {
+        const later = () => {
+          clearTimeout(timeout);
+          func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+      };
+    }
+
+    async function renderPixiBubbleChart(apiData, bubbleSortKey = 'change_pct') {
+      currentBubbleSortKey = bubbleSortKey;
+      currentRawData = apiData; // Store raw data for re-renders (e.g., on resize)
+
+      const container = document.getElementById('pixiBubbleChartContainer');
+      if (!container) {
+        console.error('Pixi container not found!');
+        return;
+      }
+
+      // Clear previous PIXI app if exists
+      if (currentPixiApp) {
+        if (tickerUpdateFn) {
+          currentPixiApp.ticker.remove(tickerUpdateFn);
+          tickerUpdateFn = null;
+        }
+        currentPixiApp.destroy(true, { children: true, texture: true, baseTexture: true });
+        currentPixiApp = null;
+      }
+      container.innerHTML = ''; // Clear any leftover canvas or messages
+
+      if (!Array.isArray(apiData) || apiData.length === 0) {
+        const msg = document.createElement('div');
+        msg.style.color = '#f44336';
+        msg.style.textAlign = 'center';
+        msg.style.marginTop = '20px';
+        msg.textContent = 'Tidak ada data untuk ditampilkan pada bubble chart (Pixi.js).';
+        container.appendChild(msg);
+        console.warn('[Pixi] No data to render.');
+        return;
+      }
+
+      // Use appConfig from bubbles_utils.js, ensuring it reflects current window size
+      const pixiWidth = window.appConfig.width = container.clientWidth || (typeof window !== "undefined" ? window.innerWidth - 16 : 800);
+      const pixiHeight = window.appConfig.height = container.clientHeight || (typeof window !== "undefined" ? window.innerHeight * 0.7 : 600);
+      
+      currentPixiApp = new PIXI.Application({
+        width: pixiWidth,
+        height: pixiHeight,
+        backgroundColor: 0x222222,
+        antialias: true,
+        resolution: window.devicePixelRatio || 1,
+        autoDensity: true,
+      });
+      container.appendChild(currentPixiApp.view);
+
+      // --- Integration with BubblesUtils ---
+      const scalingFactor = BubblesUtils.getScalingFactor(apiData, bubbleSortKey);
+      currentBubblesData = BubblesUtils.generateCircles(apiData, scalingFactor, bubbleSortKey);
+
+      const pixiCircleSprites = [];
+      const pixiSymbolTexts = [];
+      const pixiPriceChangeTexts = [];
+
+      currentBubblesData.forEach(circleData => {
+        const bubbleContainer = new PIXI.Container();
+        bubbleContainer.x = circleData.x;
+        bubbleContainer.y = circleData.y;
+
+        // Create circle graphic (Sprite with gradient texture)
+        const circleSprite = new PIXI.Sprite(PixiUtils.createGradientTexture(circleData.radius * 2, circleData.color));
+        circleSprite.anchor.set(0.5);
+        circleSprite.width = circleData.radius * 2;
+        circleSprite.height = circleData.radius * 2;
+        bubbleContainer.addChild(circleSprite);
+
+        // Symbol Text - Always display ticker regardless of bubble size
+        const symbolTextStyle = new PIXI.TextStyle({
+          fontSize: Math.max(10, circleData.radius * 0.4), // Increased minimum font size to ensure visibility
+          fill: "#ffffff",
+          align: 'center',
+          fontWeight: 'bold',
+          wordWrap: true,
+          wordWrapWidth: circleData.radius * 1.8
+        });
+        const symbolText = new PIXI.Text(circleData.symbol.toUpperCase(), symbolTextStyle);
+        symbolText.anchor.set(0.5);
+        symbolText.position.set(0, -circleData.radius * 0.1);
+        bubbleContainer.addChild(symbolText);
+
+        // Price Change Text (text2)
+        const priceChangeTextStyle = new PIXI.TextStyle({
+          fontSize: Math.max(7, circleData.radius * 0.3),
+          fill: "#ffffff",
+          align: 'center'
+        });
+        const priceChangeText = new PIXI.Text(circleData.text2, priceChangeTextStyle);
+        priceChangeText.anchor.set(0.5);
+        priceChangeText.position.set(0, circleData.radius * 0.5);
+        bubbleContainer.addChild(priceChangeText);
+        
+        bubbleContainer.interactive = true;
+        bubbleContainer.buttonMode = true;
+        // Cache as bitmap for performance once initial size is set, BubblesUtils.update will manage this
+        // bubbleContainer.cacheAsBitmap = true; 
+
+        bubbleContainer.on('pointerover', () => {
+          bubbleContainer.alpha = 0.7;
+          // Optional: Slightly scale up on hover
+          // bubbleContainer.scale.set(1.05);
+          currentPixiApp.renderer.view.style.cursor = 'pointer';
+        });
+        bubbleContainer.on('pointerout', () => {
+          bubbleContainer.alpha = 1.0;
+          // bubbleContainer.scale.set(1.0);
+          currentPixiApp.renderer.view.style.cursor = 'default';
+        });
+        bubbleContainer.on('pointertap', () => {
+          const rawStockData = apiData.find(c => c.ticker === circleData.id);
+          let stockInfo = `${circleData.symbol.toUpperCase()}\n` +
+            `Change: ${circleData.text2}\n` +
+            `Close: ${rawStockData.close_today || 'N/A'}\n` +
+            `Yesterday: ${rawStockData.yesterday_close_price || rawStockData.close_yesterday || 'N/A'}`;
+          
+          // Add LQ45 and ISSI information
+          if (rawStockData.lq45) {
+            stockInfo += '\nLQ45: Ya';
+          }
+          if (rawStockData.issi) {
+            stockInfo += '\nISSI: Ya';
+          }
+          
+          alert(stockInfo);
+        });
+
+        bubbleContainer.on('pointerdown', (event) => {
+          circleData.dragging = true;
+          // Bring to front if desired
+          // currentPixiApp.stage.addChild(bubbleContainer);
+          // Record initial mouse offset if needed for precise dragging, or let BubblesUtils handle it
+        });
+
+        currentPixiApp.stage.addChild(bubbleContainer);
+        pixiCircleSprites.push(circleSprite); // Store the sprite itself for texture updates
+        pixiSymbolTexts.push(symbolText);
+        pixiPriceChangeTexts.push(priceChangeText);
+      });
+
+      // Stage-level interactions
+      currentPixiApp.stage.interactive = true;
+      currentPixiApp.stage.hitArea = currentPixiApp.screen; // Ensure stage catches clicks in empty areas
+
+      currentPixiApp.stage.on('pointerdown', (event) => {
+        // Check if the click was on the stage itself, not on a bubble
+        if (event.target === currentPixiApp.stage) {
+          // Pass the event.data.global object directly which has x and y properties
+          console.log('Stage click detected at', event.data.global.x, event.data.global.y);
+          BubblesUtils.handleEmptySpaceClick(event.data.global, currentBubblesData, currentPixiApp);
+        }
+      });
+      currentPixiApp.stage.on('pointerup', () => currentBubblesData.forEach(c => c.dragging = false));
+      currentPixiApp.stage.on('pointerupoutside', () => currentBubblesData.forEach(c => c.dragging = false));
+      currentPixiApp.stage.on('pointermove', (event) => {
+          BubblesUtils.handleMouseMove(event.data.global, currentBubblesData, currentPixiApp);
+      });
+
+      // Start the animation loop
+      if (tickerUpdateFn) {
+        currentPixiApp.ticker.remove(tickerUpdateFn); // Remove old one if any (should be handled by app destroy)
+      }
+      // Note: imageSprites is empty as we are not using them here.
+      tickerUpdateFn = BubblesUtils.update(currentBubblesData, [], pixiSymbolTexts, pixiPriceChangeTexts, pixiCircleSprites);
+      currentPixiApp.ticker.add(tickerUpdateFn);
+    }
+
+    async function fetchAndRenderPixi(topN = null, bubbleSortKey = 'change_pct', filterType = null) {
+      // Data normalization is now handled by BubblesUtils.generateCircles or expected in apiData structure
+      const container = document.getElementById('pixiBubbleChartContainer');
+      container.innerHTML = '';
+      // PIXI Application instance is created and managed by the renderPixiBubbleChart function.
+
+      // Update current filter type if provided
+      if (filterType) {
+        currentFilterType = filterType;
+      }
+
+      console.log(`[Pixi] Fetching data for Top ${topN}, sort key: ${bubbleSortKey}, filter: ${currentFilterType}`);
+      // Data validation and "no data" messages are handled within renderPixiBubbleChart.
+      try {
+        const res = await fetch('/api/bubbles');
+        let data = await res.json();
+        if (Array.isArray(data)) {
+          // Apply filter for LQ45 or ISSI if needed
+          if (currentFilterType === 'lq45') {
+            data = data.filter(item => item.lq45 === true);
+            console.log(`[Pixi] Filtered to ${data.length} LQ45 stocks`);
+          } else if (currentFilterType === 'issi') {
+            data = data.filter(item => item.issi === true);
+            console.log(`[Pixi] Filtered to ${data.length} ISSI stocks`);
+          }
+
+          // Sort by absolute change percentage
+          data = data.sort((a, b) => Math.abs(b.change_pct || 0) - Math.abs(a.change_pct || 0));
+          
+          // Apply top N limit if specified
+          if (topN && currentFilterType === 'all') {
+            data = data.slice(0, topN);
+          }
+        }
+        renderPixiBubbleChart(data, bubbleSortKey);
+      } catch (e) {
+        console.error('[Pixi] Error fetching data:', e);
+        const res = await fetch('/api/bubbles-mock');
+        let data = await res.json();
+        if (Array.isArray(data)) {
+          // Apply filter for LQ45 or ISSI if needed
+          if (currentFilterType === 'lq45') {
+            data = data.filter(item => item.lq45 === true);
+            console.log(`[Pixi] Filtered to ${data.length} LQ45 stocks (mock data)`);
+          } else if (currentFilterType === 'issi') {
+            data = data.filter(item => item.issi === true);
+            console.log(`[Pixi] Filtered to ${data.length} ISSI stocks (mock data)`);
+          }
+
+          // Sort by absolute change percentage
+          data = data.sort((a, b) => Math.abs(b.change_pct || 0) - Math.abs(a.change_pct || 0));
+          
+          // Apply top N limit if specified
+          if (topN && currentFilterType === 'all') {
+            data = data.slice(0, topN);
+          }
+        }
+        renderPixiBubbleChart(data, bubbleSortKey);
+      }
+}
+    const debouncedResizeRender = debounce(() => {
+      console.log('[Pixi] Window resized, re-rendering...');
+      if (currentRawData && typeof currentRawData.length !== 'undefined' && currentRawData.length > 0) {
+        renderPixiBubbleChart(currentRawData, currentBubbleSortKey);
+      } else {
+        console.log('[Pixi] No current data to re-render on resize.');
+      }
+    }, 250);
+
+    window.addEventListener('resize', debouncedResizeRender);
+
+    window.addEventListener('DOMContentLoaded', () => {
+      // Initial fetch and render. Default to Top 100 or a full set.
+      // Using 'change_pct' as the default key for bubble size and color. This should match your API data.
+      fetchAndRenderPixi(100, 'change_pct', 'all'); 
+    });
+  </script>
+</body>
+</html>

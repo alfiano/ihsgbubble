@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>IHSG Bubble Chart</title>
+  <!-- D3.js CDN -->
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <!-- Pixi.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/pixi.js@7.x/dist/pixi.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; background: #181c20; color: #fff; }
+    h1 { text-align: center; }
+    #bubbleChart { background: #222; margin: 0 auto; display: block; }
+    .legend { text-align: center; margin-top: 10px; }
+  </style>
+</head>
+<body><h1>IHSG Bubble Chart</h1>
+  <svg id="bubbleChartSVG" width="900" height="600" style="display:block;margin:auto;"></svg>
+  <!-- Pixi.js Bubble Chart Container -->
+  <div id="pixiBubbleChartContainer" style="width:900px; height:600px; margin:0 auto 20px auto; background:#222;"></div>
+  <div class="legend">
+    <span style="color:#4caf50;">● Naik</span> &nbsp;
+    <span style="color:#f44336;">● Turun</span>
+  </div>
+  <div id="filter-panel" style="text-align:center; margin: 18px 0 10px 0;">
+    <button onclick="setTopGainers(20)">Top 20</button>
+    <button onclick="setTopGainers(50)">Top 50</button>
+    <button onclick="setTopGainers(100)">Top 100</button>
+  </div>
+  <script>
+    let allRawData = [];
+    let currentTopGainers = null;
+
+    async function fetchData() {
+      try {
+        console.log('Fetching data from /api/bubbles');
+        const res = await fetch('/api/bubbles');
+        if (!res.ok) {
+          if (res.status === 404) {
+            // Handle 404 specifically - no data for this date
+            const errorData = await res.json();
+            console.warn('No data found:', errorData.error);
+            // Show a more user-friendly message
+            document.getElementById('bubbleChart').insertAdjacentHTML('afterend', 
+              `<div style="text-align: center; color: #f44336; margin-top: 20px;">${errorData.error}</div>`);
+            
+            console.warn('Falling back to mock data');
+            const mockRes = await fetch('/api/bubbles-mock');
+            if (!mockRes.ok) {
+              throw new Error('Both API endpoints failed');
+            }
+            return await mockRes.json();
+          } else {
+            // For other errors, try mock data
+            console.warn('Failed to fetch from main API, trying mock data');
+            const mockRes = await fetch('/api/bubbles-mock');
+            if (!mockRes.ok) {
+              throw new Error('Both API endpoints failed');
+            }
+            return await mockRes.json();
+          }
+        }
+        return await res.json();
+      } catch (error) {
+        console.error('Error fetching data:', error);
+        alert('Failed to load data. Check console for details.');
+        return []; // Return empty array to prevent further errors
+      }
+    }
+
+    function getBubbleData(raw, allShowLabel = false) {
+      console.log('Processing data:', raw);
+      // Check if raw is an array
+      if (!Array.isArray(raw)) {
+        console.error('Data is not an array:', raw);
+        return [];
+      }
+      
+      // Filter data valid, ambil 100 terbesar perubahan
+      // Perubahan harga sudah dihitung di backend
+      const sorted = raw
+        .filter(d => d.change_pct !== null && !isNaN(d.change_pct))
+        .sort((a, b) => Math.abs(b.change_pct) - Math.abs(a.change_pct))
+        .slice(0, 803);
+
+      // Create bubbles with random positions
+      const bubbles = sorted.map(d => ({
+        x: Math.random() * 100, // random X position
+        y: Math.random() * 100, // random Y position
+        r: Math.max(8, Math.abs(d.change_pct) * 2), // radius proporsional perubahan
+        ticker: d.ticker,
+        change_pct: d.change_pct,
+        close_today: d.close_today,
+        yesterday_close_price: d.yesterday_close_price,
+        close_yesterday: d.close_yesterday,
+        color: d.change_pct >= 0 ? '#4caf50' : '#f44336'
+      }));
+      
+      // Mark top 10 gainers and top 10 losers for labeling
+      if (allShowLabel) {
+        // If filtered for top gainers, show label for all
+        bubbles.forEach(b => { b.showLabel = true; });
+      } else {
+        const top10Up = [...bubbles].sort((a, b) => b.change_pct - a.change_pct).slice(0, 10);
+        const top10Down = [...bubbles].sort((a, b) => a.change_pct - b.change_pct).slice(0, 10);
+        const markSet = new Set([
+          ...top10Up.map(b => b.ticker),
+          ...top10Down.map(b => b.ticker)
+        ]);
+        bubbles.forEach(b => {
+          b.showLabel = markSet.has(b.ticker);
+        });
+      }
+
+      // Use Poisson Disk Sampling to prevent overlaps and keep randomness
+      poissonDiskSampleBubbles(bubbles);
+      
+      return bubbles;
+    }
+    
+    // Poisson Disk Sampling for non-overlapping random bubble placement
+    function poissonDiskSampleBubbles(bubbles) {
+      const CANVAS_WIDTH = 100;
+      const CANVAS_HEIGHT = 100;
+      const placed = [];
+      const MAX_TRIES = 500;
+      
+      // Sort bubbles by radius descending
+      bubbles.sort((a, b) => b.r - a.r);
+      
+      for (let i = 0; i < bubbles.length; i++) {
+        const bubble = bubbles[i];
+        let placedSuccessfully = false;
+        for (let tries = 0; tries < MAX_TRIES; tries++) {
+          // Try a random position
+          const x = Math.random() * (CANVAS_WIDTH - 2 * bubble.r) + bubble.r;
+          const y = Math.random() * (CANVAS_HEIGHT - 2 * bubble.r) + bubble.r;
+          let overlaps = false;
+          for (let j = 0; j < placed.length; j++) {
+            const other = placed[j];
+            const dx = x - other.x;
+            const dy = y - other.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < bubble.r + other.r + 3) { // 3px padding
+              overlaps = true;
+              break;
+            }
+          }
+          if (!overlaps) {
+            bubble.x = x;
+            bubble.y = y;
+            placed.push(bubble);
+            placedSuccessfully = true;
+            break;
+          }
+        }
+        // If not placed after many tries, just put it somewhere (may overlap)
+        if (!placedSuccessfully) {
+          bubble.x = Math.random() * (CANVAS_WIDTH - 2 * bubble.r) + bubble.r;
+          bubble.y = Math.random() * (CANVAS_HEIGHT - 2 * bubble.r) + bubble.r;
+          placed.push(bubble);
+        }
+      }
+    }
+
+    // D3 Bubble Chart with Force Simulation
+    function renderD3BubbleChart(bubbles) {
+      const width = 900;
+      const height = 600;
+      const svg = d3.select("#bubbleChartSVG");
+      svg.selectAll("*").remove(); // Clear previous
+
+      // Scale radius agar proporsional
+      const minR = 18, maxR = 55;
+      const minChange = d3.min(bubbles, d => Math.abs(d.change_pct));
+      const maxChange = d3.max(bubbles, d => Math.abs(d.change_pct));
+      const radiusScale = d3.scaleLinear()
+        .domain([minChange, maxChange])
+        .range([minR, maxR]);
+
+      // Siapkan node data
+      const nodes = bubbles.map(d => ({
+        ...d,
+        radius: radiusScale(Math.abs(d.change_pct)),
+        x: Math.random() * width,
+        y: Math.random() * height
+      }));
+
+      // Force simulation
+      const simulation = d3.forceSimulation(nodes)
+        .force("center", d3.forceCenter(width / 2, height / 2))
+        .force("charge", d3.forceManyBody().strength(1))
+        .force("collision", d3.forceCollide().radius(d => d.radius + 2))
+        .on("tick", ticked);
+
+      // Bubble group
+      const node = svg.selectAll("g")
+        .data(nodes)
+        .enter()
+        .append("g")
+        .attr("class", "bubble-group");
+
+      // Draw bubbles
+      node.append("circle")
+        .attr("r", d => d.radius)
+        .attr("fill", d => d.color)
+        .attr("stroke", "#fff")
+        .attr("stroke-width", 1.5)
+        .style("cursor", "pointer")
+        .on("mouseover", function(e, d) {
+          d3.select(this).attr("stroke", "#333").attr("stroke-width", 3);
+          tooltip.style("display", "block")
+            .html(`<strong>${d.ticker}</strong><br>Kenaikan: ${d.change_pct.toFixed(2)}%<br>Close hari ini: ${d.close_today ?? '-'}<br>Close kemarin: ${d.yesterday_close_price ?? d.close_yesterday ?? '-'}`);
+        })
+        .on("mousemove", function(e) {
+          tooltip.style("left", (e.pageX + 15) + "px")
+            .style("top", (e.pageY - 28) + "px");
+        })
+        .on("mouseout", function() {
+          d3.select(this).attr("stroke", "#fff").attr("stroke-width", 1.5);
+          tooltip.style("display", "none");
+        });
+
+      // Draw ticker label
+      node.append("text")
+        .attr("text-anchor", "middle")
+        .attr("dy", "-0.2em")
+        .style("font-weight", "bold")
+        .style("pointer-events", "none")
+        .style("fill", "#fff")
+        .text(d => d.ticker.replace(/\.jk$/i, ""))
+        .style("font-size", d => Math.max(10, d.radius * 0.7) + "px");
+
+      // Draw percent label
+      node.append("text")
+        .attr("text-anchor", "middle")
+        .attr("dy", "1.2em")
+        .style("pointer-events", "none")
+        .style("fill", "#fff")
+        .text(d => `${d.change_pct >= 0 ? '+' : ''}${d.change_pct.toFixed(2)}%`)
+        .style("font-size", d => Math.max(10, d.radius * 0.55) + "px");
+
+      function ticked() {
+        node.attr("transform", d => `translate(${d.x},${d.y})`);
+      }
+
+      // Tooltip
+      let tooltip = d3.select("body").select("#bubble-tooltip");
+      if (tooltip.empty()) {
+        tooltip = d3.select("body")
+          .append("div")
+          .attr("id", "bubble-tooltip")
+          .style("position", "absolute")
+          .style("background", "rgba(0,0,0,0.8)")
+          .style("color", "#fff")
+          .style("padding", "8px 14px")
+          .style("border-radius", "7px")
+          .style("pointer-events", "none")
+          .style("font-size", "15px")
+          .style("display", "none")
+          .style("z-index", 1000);
+      }
+    }
+    // Nonaktifkan Chart.js lama
+    // let chartInstance = null;
+    // function renderChart(bubbles) { ... lama ... }
+    // Seluruh kode Chart.js dihapus, hanya gunakan D3.js untuk visualisasi.
+
+    fetchData().then(raw => {
+      allRawData = raw;
+      currentTopGainers = null;
+      const bubbles = getBubbleData(raw);
+      if (bubbles.length > 0) {
+        renderD3BubbleChart(bubbles);
+      } else {
+        document.getElementById('bubbleChart').insertAdjacentHTML('afterend', 
+          '<div style="text-align: center; color: #f44336; margin-top: 20px;">No valid data available to display</div>');
+      }
+    }).catch(error => {
+      console.error('Error in main flow:', error);
+      document.getElementById('bubbleChart').insertAdjacentHTML('afterend', 
+        '<div style="text-align: center; color: #f44336; margin-top: 20px;">Failed to load chart data</div>');
+    });
+
+    function setTopGainers(n) {
+      if (!Array.isArray(allRawData) || allRawData.length === 0) return;
+      currentTopGainers = n;
+      // Sort descending by change_pct and take top n
+      const filtered = [...allRawData]
+        .filter(d => d.change_pct !== null && !isNaN(d.change_pct))
+        .sort((a, b) => b.change_pct - a.change_pct)
+        .slice(0, n);
+      const bubbles = getBubbleData(filtered, true); // true = only show label for all
+      renderD3BubbleChart(bubbles);
+    }
+    // =============== PIXI.JS BUBBLE CHART IMPLEMENTATION ===============
+    async function renderPixiBubbleChart(bubbles) {
+      // Remove previous Pixi.js canvas if exists
+      const container = document.getElementById('pixiBubbleChartContainer');
+      container.innerHTML = '';
+      // Create Pixi Application
+      const app = new PIXI.Application({
+        width: 900,
+        height: 600,
+        backgroundColor: 0x222222,
+        antialias: true,
+        resolution: window.devicePixelRatio || 1,
+      });
+      container.appendChild(app.view);
+      // Logging
+      console.log('[Pixi] Data bubbles:', bubbles);
+      if (!Array.isArray(bubbles) || bubbles.length === 0) {
+        // Tampilkan pesan di UI
+        const msg = document.createElement('div');
+        msg.style.color = '#f44336';
+        msg.style.textAlign = 'center';
+        msg.style.marginTop = '20px';
+        msg.textContent = 'Tidak ada data untuk ditampilkan pada bubble chart (Pixi.js).';
+        container.appendChild(msg);
+        return;
+      }
+      // Bubble scaling
+      const minRadius = 12, maxRadius = 60;
+      const minChange = Math.min(...bubbles.map(b => Math.abs(b.change)));
+      const maxChange = Math.max(...bubbles.map(b => Math.abs(b.change)));
+      function scaleRadius(change) {
+        if (maxChange === minChange) return (minRadius + maxRadius) / 2;
+        return minRadius + (Math.abs(change) - minChange) / (maxChange - minRadius) * (maxRadius - minRadius);
+      }
+      // Simple circle packing (random placement, retry if overlap, fallback to grid if too many fails)
+      const placed = [];
+      for (const b of bubbles) {
+        let tries = 0, x, y, r = scaleRadius(b.change);
+        let ok = false;
+        while (tries < 200 && !ok) {
+          x = r + Math.random() * (900 - 2 * r);
+          y = r + Math.random() * (600 - 2 * r);
+          ok = placed.every(p => Math.hypot(x - p.x, y - p.y) > r + p.r + 2);
+          tries++;
+        }
+        if (!ok) {
+          // fallback: grid placement
+          x = r + ((placed.length * (2*r+4)) % (900-2*r));
+          y = r + (Math.floor(placed.length * (2*r+4) / (900-2*r)) * (2*r+4)) % (600-2*r);
+        }
+        placed.push({x, y, r});
+      }
+      // Draw bubbles
+      for (let i = 0; i < bubbles.length; i++) {
+        const b = bubbles[i];
+        const { x, y, r } = placed[i];
+        const color = b.change >= 0 ? 0x4caf50 : 0xf44336;
+        const circle = new PIXI.Graphics();
+        circle.beginFill(color, 0.8);
+        circle.lineStyle(2, 0xffffff, 0.7);
+        circle.drawCircle(0, 0, r);
+        circle.endFill();
+        circle.x = x;
+        circle.y = y;
+        app.stage.addChild(circle);
+        // Label (stock symbol)
+        const label = new PIXI.Text(b.symbol, {
+          fontFamily: 'Arial',
+          fontSize: Math.max(14, r / 2),
+          fill: '#fff',
+          align: 'center',
+          fontWeight: 'bold',
+        });
+        label.anchor.set(0.5);
+        label.x = x;
+        label.y = y;
+        app.stage.addChild(label);
+        // Tooltip
+        circle.interactive = true;
+        circle.buttonMode = true;
+        circle.on('pointerover', () => {
+          circle.alpha = 0.6;
+          app.renderer.view.style.cursor = 'pointer';
+        });
+        circle.on('pointerout', () => {
+          circle.alpha = 1.0;
+          app.renderer.view.style.cursor = 'default';
+        });
+        circle.on('pointertap', () => {
+          alert(`${b.symbol}\n${b.name}\nChange: ${(b.change*100).toFixed(2)}%\nClose: ${b.close_price}`);
+        });
+      }
+    }
+
+    // Fetch and render for Pixi.js (reuse fetchData logic)
+    async function fetchAndRenderPixi(topN = null) {
+      try {
+        const res = await fetch('/api/bubbles');
+        let data = await res.json();
+        if (topN && Array.isArray(data)) {
+          data = data.slice(0, topN);
+        }
+        renderPixiBubbleChart(data);
+      } catch (e) {
+        // fallback to mock
+        const res = await fetch('/api/bubbles-mock');
+        let data = await res.json();
+        if (topN && Array.isArray(data)) {
+          data = data.slice(0, topN);
+        }
+        renderPixiBubbleChart(data);
+      }
+    }
+    // Inisialisasi Pixi.js bubble chart saat halaman load
+    window.addEventListener('DOMContentLoaded', () => {
+      fetchAndRenderPixi(20);
+    });
+    // Tombol filter juga update Pixi.js chart
+    window.setTopGainers = function(n) {
+      setTopGainers_orig(n); // D3.js
+      fetchAndRenderPixi(n); // Pixi.js
+    }
+    // Simpan referensi asli setTopGainers
+    window.setTopGainers_orig = window.setTopGainers;
+  </script>
+</body>
+</html>

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>IHSG Bubble Chart</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; background: #181c20; color: #fff; }
+    h1 { text-align: center; }
+    #bubbleChart { background: #222; margin: 0 auto; display: block; }
+    .legend { text-align: center; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>IHSG Bubble Chart</h1>
+  <canvas id="bubbleChart" width="1200" height="700"></canvas>
+  <div class="legend">
+    <span style="color:#4caf50;">● Naik</span> &nbsp;
+    <span style="color:#f44336;">● Turun</span>
+  </div>
+  <script>
+    async function fetchData() {
+      const res = await fetch('/api/bubbles');
+      return await res.json();
+    }
+
+    function getBubbleData(raw) {
+      // Filter data valid, ambil 100 terbesar perubahan
+      const sorted = raw
+        .filter(d => d.change_pct !== null && !isNaN(d.change_pct))
+        .sort((a, b) => Math.abs(b.change_pct) - Math.abs(a.change_pct))
+        .slice(0, 100);
+
+      return sorted.map(d => ({
+        x: Math.random() * 100, // sebar acak di sumbu X
+        y: Math.random() * 100, // sebar acak di sumbu Y
+        r: Math.max(8, Math.abs(d.change_pct) * 2), // radius proporsional perubahan
+        ticker: d.ticker,
+        change_pct: d.change_pct,
+        close_today: d.close_today,
+        close_yesterday: d.close_yesterday,
+        color: d.change_pct >= 0 ? '#4caf50' : '#f44336'
+      }));
+    }
+
+    function renderChart(bubbles) {
+      const ctx = document.getElementById('bubbleChart').getContext('2d');
+      new Chart(ctx, {
+        type: 'bubble',
+        data: {
+          datasets: [{
+            label: 'IHSG Bubbles',
+            data: bubbles,
+            backgroundColor: bubbles.map(b => b.color),
+            borderColor: '#fff',
+            borderWidth: 1
+          }]
+        },
+        options: {
+          plugins: {
+            tooltip: {
+              callbacks: {
+                label: function(context) {
+                  const d = context.raw;
+                  return [
+                    d.ticker,
+                    `Kenaikan: ${d.change_pct?.toFixed(2) ?? '-'}%`,
+                    `Close hari ini: ${d.close_today ?? '-'}`,
+                    `Close kemarin: ${d.close_yesterday ?? '-'}`
+                  ];
+                }
+              }
+            },
+            legend: { display: false }
+          },
+          scales: {
+            x: { display: false, min: 0, max: 100 },
+            y: { display: false, min: 0, max: 100 }
+          }
+        }
+      });
+    }
+
+    fetchData().then(raw => {
+      const bubbles = getBubbleData(raw);
+      renderChart(bubbles);
+    });
+  </script>
+</body>
+</html>
